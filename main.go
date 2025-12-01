@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -53,11 +54,26 @@ var userCollection *mongo.Collection
 
 // --- KONEKSI DATABASE ---
 func connectDB() {
-	// Ganti string koneksi jika perlu
-	clientOptions := options.Client().ApplyURI("mongodb+srv://Maiys0311_db:Miqdam031104@maiys0311.w9twyze.mongodb.net/")
+	// AMBIL DARI ENV VARIABLE (Setting di Dashboard Render nanti)
+	mongoURI := os.Getenv("MONGO_URI")
+	
+	if mongoURI == "" {
+		// Fallback jika lupa set env (misal saat test lokal tanpa .env)
+		// Sebaiknya diisi string koneksi lokal atau biarkan kosong untuk memaksa error agar sadar
+		log.Println("⚠️ Peringatan: MONGO_URI tidak ditemukan di environment variable.")
+		// mongoURI = "mongodb://localhost:27017" // Uncomment jika ingin fallback ke lokal
+	}
+
+	clientOptions := options.Client().ApplyURI(mongoURI)
 	client, err := mongo.Connect(context.TODO(), clientOptions)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// Cek koneksi (Ping)
+	err = client.Ping(context.TODO(), nil)
+	if err != nil {
+		log.Fatal("Gagal terhubung ke MongoDB:", err)
 	}
 
 	fmt.Println("✅ Terhubung ke MongoDB!")
@@ -70,9 +86,10 @@ func main() {
 
 	r := gin.Default()
 
-	// Setup CORS: Izinkan Header 'X-User-Email' untuk identifikasi user
+	// --- SETUP CORS ---
+	// Agar Frontend (Vercel) bisa akses Backend ini
 	config := cors.DefaultConfig()
-	config.AllowAllOrigins = true
+	config.AllowAllOrigins = true // Bolehkan semua domain (untuk tahap awal deploy)
 	config.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "X-User-Email"}
 	r.Use(cors.New(config))
 
@@ -100,7 +117,7 @@ func main() {
 		newUser := User{
 			ID:       primitive.NewObjectID(),
 			Email:    input.Email,
-			Password: input.Password, // Idealnya di-hash dulu
+			Password: input.Password, // Catatan: Sebaiknya di-hash di production
 			Role:     "user",         // Default role
 		}
 
@@ -130,7 +147,7 @@ func main() {
 
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Login sukses",
-			"user":    user, // Frontend akan menyimpan data ini (terutama role & email)
+			"user":    user,
 		})
 	})
 
@@ -138,7 +155,7 @@ func main() {
 	// 2. LOCATION ROUTES (CRUD DATA PETA)
 	// ==========================================
 
-	// GET ALL LOCATIONS (Public - Semua bisa lihat)
+	// GET ALL LOCATIONS (Public)
 	r.GET("/locations", func(c *gin.Context) {
 		var locations []Location
 		cursor, err := geoCollection.Find(context.TODO(), bson.M{})
@@ -153,12 +170,15 @@ func main() {
 			cursor.Decode(&loc)
 			locations = append(locations, loc)
 		}
+		// Kirim array kosong [] jika data null, bukan null
+		if locations == nil {
+			locations = []Location{}
+		}
 		c.JSON(http.StatusOK, locations)
 	})
 
-	// ADD LOCATION (Butuh Identitas User)
+	// ADD LOCATION
 	r.POST("/locations", func(c *gin.Context) {
-		// Ambil siapa yang request dari Header (Dikirim oleh Frontend)
 		userEmail := c.GetHeader("X-User-Email")
 		if userEmail == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Anda harus login!"})
@@ -172,7 +192,7 @@ func main() {
 		}
 
 		newLocation.ID = primitive.NewObjectID()
-		newLocation.CreatedBy = userEmail // Otomatis isi pembuatnya
+		newLocation.CreatedBy = userEmail
 
 		_, err := geoCollection.InsertOne(context.TODO(), newLocation)
 		if err != nil {
@@ -183,21 +203,19 @@ func main() {
 		c.JSON(http.StatusCreated, gin.H{"message": "Lokasi ditambahkan!", "data": newLocation})
 	})
 
-	// EDIT LOCATION (Logic: Admin OR Owner)
+	// EDIT LOCATION
 	r.PUT("/locations/:id", func(c *gin.Context) {
 		idParam := c.Param("id")
 		objID, _ := primitive.ObjectIDFromHex(idParam)
 		
-		// 1. Ambil Data User yang Request
 		requestorEmail := c.GetHeader("X-User-Email")
 		var requestor User
 		err := userCollection.FindOne(context.TODO(), bson.M{"email": requestorEmail}).Decode(&requestor)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "User tidak dikenali/login"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User tidak dikenali"})
 			return
 		}
 
-		// 2. Ambil Data Lokasi yang mau diedit (Cek punya siapa)
 		var existingLoc Location
 		err = geoCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&existingLoc)
 		if err != nil {
@@ -205,14 +223,12 @@ func main() {
 			return
 		}
 
-		// 3. LOGIKA SAKTI: Cek Hak Akses
-		// Boleh edit JIKA: Role Admin ATAU Email Pembuat == Email Requestor
+		// Validasi Hak Akses
 		if requestor.Role != "admin" && existingLoc.CreatedBy != requestor.Email {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Anda tidak berhak mengedit data orang lain!"})
 			return
 		}
 
-		// 4. Proses Update
 		var updateData Location
 		if err := c.ShouldBindJSON(&updateData); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -236,12 +252,11 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Data berhasil diupdate"})
 	})
 
-	// DELETE LOCATION (Logic: Admin OR Owner)
+	// DELETE LOCATION
 	r.DELETE("/locations/:id", func(c *gin.Context) {
 		idParam := c.Param("id")
 		objID, _ := primitive.ObjectIDFromHex(idParam)
 
-		// 1. Cek User
 		requestorEmail := c.GetHeader("X-User-Email")
 		var requestor User
 		err := userCollection.FindOne(context.TODO(), bson.M{"email": requestorEmail}).Decode(&requestor)
@@ -250,7 +265,6 @@ func main() {
 			return
 		}
 
-		// 2. Cek Lokasi
 		var existingLoc Location
 		err = geoCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&existingLoc)
 		if err != nil {
@@ -258,29 +272,30 @@ func main() {
 			return
 		}
 
-		// 3. Cek Hak Akses
 		if requestor.Role != "admin" && existingLoc.CreatedBy != requestor.Email {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Anda tidak berhak menghapus data orang lain!"})
 			return
 		}
 
-		// 4. Hapus
 		_, err = geoCollection.DeleteOne(context.TODO(), bson.M{"_id": objID})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menghapus data"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"message": "Data berhasil dihapus"})
 	})
 
 	// ==========================================
-	// 3. ADMIN USER MANAGEMENT (ADMIN ONLY)
+	// 3. ADMIN USER MANAGEMENT
 	// ==========================================
 
-	// Helper function untuk cek admin
 	funcIsAdmin := func(email string) bool {
 		var u User
 		userCollection.FindOne(context.TODO(), bson.M{"email": email}).Decode(&u)
 		return u.Role == "admin"
 	}
 
-	// GET ALL USERS (Admin Only)
+	// GET ALL USERS
 	r.GET("/users", func(c *gin.Context) {
 		requestorEmail := c.GetHeader("X-User-Email")
 		if !funcIsAdmin(requestorEmail) {
@@ -296,10 +311,11 @@ func main() {
 			cursor.Decode(&u)
 			users = append(users, u)
 		}
+		if users == nil { users = []User{} }
 		c.JSON(http.StatusOK, users)
 	})
 
-	// UPDATE USER ROLE (Admin Only - Promote/Demote)
+	// UPDATE USER ROLE
 	r.PUT("/users/:id/role", func(c *gin.Context) {
 		requestorEmail := c.GetHeader("X-User-Email")
 		if !funcIsAdmin(requestorEmail) {
@@ -310,7 +326,7 @@ func main() {
 		idParam := c.Param("id")
 		objID, _ := primitive.ObjectIDFromHex(idParam)
 		var input RoleInput
-		c.ShouldBindJSON(&input) // misal: {"role": "admin"}
+		c.ShouldBindJSON(&input)
 
 		_, err := userCollection.UpdateOne(context.TODO(), bson.M{"_id": objID}, bson.M{"$set": bson.M{"role": input.Role}})
 		if err != nil {
@@ -320,7 +336,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Role user berhasil diubah"})
 	})
 
-	// DELETE USER (Admin Only)
+	// DELETE USER
 	r.DELETE("/users/:id", func(c *gin.Context) {
 		requestorEmail := c.GetHeader("X-User-Email")
 		if !funcIsAdmin(requestorEmail) {
@@ -339,5 +355,12 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "User berhasil dihapus"})
 	})
 
-	r.Run(":8080")
+	// --- SETUP PORT UNTUK RENDER ---
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // Default port untuk localhost
+	}
+
+	fmt.Println("Server running on port " + port)
+	r.Run(":" + port)
 }
