@@ -254,6 +254,10 @@ func main() {
 		}
 
 		_, err = geoCollection.UpdateOne(context.TODO(), bson.M{"_id": objID}, update)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengupdate data"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"message": "Data berhasil diupdate"})
 	})
 
@@ -283,6 +287,10 @@ func main() {
 		}
 
 		_, err = geoCollection.DeleteOne(context.TODO(), bson.M{"_id": objID})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menghapus data"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"message": "Data berhasil dihapus"})
 	})
 
