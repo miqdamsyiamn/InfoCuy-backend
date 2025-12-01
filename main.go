@@ -9,11 +9,11 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"github.com/joho/godotenv"
 )
 
 // --- STRUCT DATA ---
@@ -53,49 +53,51 @@ type RoleInput struct {
 var geoCollection *mongo.Collection
 var userCollection *mongo.Collection
 
-// --- KONEKSI DATABASE ---
+// --- KONEKSI DATABASE (VERSI AMAN & ROBUST) ---
 func connectDB() {
-	// AMBIL DARI ENV VARIABLE (Setting di Dashboard Render nanti)
+	// 1. Ambil URI dari Environment Variable
 	mongoURI := os.Getenv("MONGO_URI")
 	
+	// 2. Cek apakah kosong? (Penting agar tidak panic diam-diam)
 	if mongoURI == "" {
-		// Fallback jika lupa set env (misal saat test lokal tanpa .env)
-		// Sebaiknya diisi string koneksi lokal atau biarkan kosong untuk memaksa error agar sadar
-		log.Println("⚠️ Peringatan: MONGO_URI tidak ditemukan di environment variable.")
-		// mongoURI = "mongodb://localhost:27017" // Uncomment jika ingin fallback ke lokal
+		log.Fatal("❌ FATAL: MONGO_URI environment variable is not set! (Cek .env di local atau Environment Variables di Render)")
 	}
 
+	// 3. Konfigurasi Client
 	clientOptions := options.Client().ApplyURI(mongoURI)
+	
+	// 4. Coba Buat Koneksi
 	client, err := mongo.Connect(context.TODO(), clientOptions)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("❌ Gagal membuat client MongoDB:", err)
 	}
 
-	// Cek koneksi (Ping)
+	// 5. Cek Koneksi (Ping) - Memastikan internet/kredensial benar
 	err = client.Ping(context.TODO(), nil)
 	if err != nil {
-		log.Fatal("Gagal terhubung ke MongoDB:", err)
+		log.Fatal("❌ Gagal ping ke MongoDB (Cek koneksi internet atau password):", err)
 	}
 
-	fmt.Println("✅ Terhubung ke MongoDB!")
+	fmt.Println("✅ Terhubung sukses ke MongoDB Atlas!")
 	geoCollection = client.Database("geo_db").Collection("geo_data")
 	userCollection = client.Database("geo_db").Collection("user")
 }
 
 func main() {
-	// --- TAMBAHAN PENTING UNTUK LOCALHOST ---
-	// Coba load file .env. Jika tidak ada (misal di Render), tidak masalah (ignore error)
+	// --- LOAD ENV FILE (Hanya untuk Localhost) ---
+	// Di Render, file .env tidak ada, jadi ini akan error tapi kita abaikan (itu normal)
 	err := godotenv.Load()
 	if err != nil {
-		fmt.Println("Info: Tidak ada file .env yang ditemukan, menggunakan environment system (Render/Cloud)")
+		fmt.Println("Info: Tidak ada file .env (Menggunakan System Environment Variables)")
 	}
-	// ----------------------------------------
+
+	// Hubungkan Database
 	connectDB()
 
 	r := gin.Default()
 
 	// --- SETUP CORS ---
-	// Agar Frontend (Vercel) bisa akses Backend ini
+	// Agar Frontend (Vercel/Localhost) bisa akses Backend ini
 	config := cors.DefaultConfig()
 	config.AllowAllOrigins = true // Bolehkan semua domain (untuk tahap awal deploy)
 	config.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "X-User-Email"}
@@ -105,7 +107,7 @@ func main() {
 	// 1. AUTHENTICATION ROUTES
 	// ==========================================
 
-	// REGISTER (Otomatis jadi USER)
+	// REGISTER
 	r.POST("/register", func(c *gin.Context) {
 		var input AuthInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -113,7 +115,6 @@ func main() {
 			return
 		}
 
-		// Cek apakah email sudah ada
 		var existingUser User
 		err := userCollection.FindOne(context.TODO(), bson.M{"email": input.Email}).Decode(&existingUser)
 		if err == nil {
@@ -121,12 +122,11 @@ func main() {
 			return
 		}
 
-		// Buat User Baru (Paksa Role jadi 'user')
 		newUser := User{
 			ID:       primitive.NewObjectID(),
 			Email:    input.Email,
-			Password: input.Password, // Catatan: Sebaiknya di-hash di production
-			Role:     "user",         // Default role
+			Password: input.Password, // Di production sebaiknya di-hash
+			Role:     "user",         
 		}
 
 		_, err = userCollection.InsertOne(context.TODO(), newUser)
@@ -138,7 +138,7 @@ func main() {
 		c.JSON(http.StatusCreated, gin.H{"message": "Registrasi berhasil!", "data": newUser})
 	})
 
-	// LOGIN (Cek Email & Password)
+	// LOGIN
 	r.POST("/login", func(c *gin.Context) {
 		var input AuthInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -163,7 +163,7 @@ func main() {
 	// 2. LOCATION ROUTES (CRUD DATA PETA)
 	// ==========================================
 
-	// GET ALL LOCATIONS (Public)
+	// GET ALL LOCATIONS
 	r.GET("/locations", func(c *gin.Context) {
 		var locations []Location
 		cursor, err := geoCollection.Find(context.TODO(), bson.M{})
@@ -178,7 +178,8 @@ func main() {
 			cursor.Decode(&loc)
 			locations = append(locations, loc)
 		}
-		// Kirim array kosong [] jika data null, bukan null
+		
+		// Pastikan return array kosong [] bukan null jika data kosong
 		if locations == nil {
 			locations = []Location{}
 		}
@@ -231,7 +232,7 @@ func main() {
 			return
 		}
 
-		// Validasi Hak Akses
+		// Validasi Hak Akses (Admin ATAU Pemilik Data)
 		if requestor.Role != "admin" && existingLoc.CreatedBy != requestor.Email {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Anda tidak berhak mengedit data orang lain!"})
 			return
@@ -253,10 +254,6 @@ func main() {
 		}
 
 		_, err = geoCollection.UpdateOne(context.TODO(), bson.M{"_id": objID}, update)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal update data"})
-			return
-		}
 		c.JSON(http.StatusOK, gin.H{"message": "Data berhasil diupdate"})
 	})
 
@@ -286,10 +283,6 @@ func main() {
 		}
 
 		_, err = geoCollection.DeleteOne(context.TODO(), bson.M{"_id": objID})
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menghapus data"})
-			return
-		}
 		c.JSON(http.StatusOK, gin.H{"message": "Data berhasil dihapus"})
 	})
 
@@ -364,11 +357,12 @@ func main() {
 	})
 
 	// --- SETUP PORT UNTUK RENDER ---
+	// Render akan otomatis inject environment variable bernama PORT
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080" // Default port untuk localhost
+		port = "8080" // Fallback ke 8080 jika dijalankan di localhost
 	}
 
-	fmt.Println("Server running on port " + port)
+	fmt.Println("🚀 Server berjalan di port " + port)
 	r.Run(":" + port)
 }
