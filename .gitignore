@@ -1,0 +1,10 @@
+# Abaikan file environment
+.env
+
+# Abaikan file hasil compile (binary)
+main
+main.exe
+*.exe
+
+# Abaikan folder IDE (optional)
+.vscode/

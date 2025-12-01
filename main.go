@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/joho/godotenv"
 )
 
 // --- STRUCT DATA ---
@@ -82,6 +83,13 @@ func connectDB() {
 }
 
 func main() {
+	// --- TAMBAHAN PENTING UNTUK LOCALHOST ---
+	// Coba load file .env. Jika tidak ada (misal di Render), tidak masalah (ignore error)
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Info: Tidak ada file .env yang ditemukan, menggunakan environment system (Render/Cloud)")
+	}
+	// ----------------------------------------
 	connectDB()
 
 	r := gin.Default()
